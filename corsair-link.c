@@ -23,7 +23,7 @@
 
 #define OUT_BUFFER_SIZE		64
 #define IN_BUFFER_SIZE		64
-#define LABEL_LENGTH		11
+#define LABEL_LENGTH		16
 #define REQ_TIMEOUT		300
 
 #define CMD_GET_ID  0x00
@@ -84,7 +84,10 @@ struct ccp_device {
 	u8 *buffer;
 	int target[6];
 	char fan_label[6][LABEL_LENGTH];
+	
 };
+
+static const char channel_labels[4][LABEL_LENGTH] = { "Power supply", "+12V", "+5V", "+3.3V"};
 
 /* converts response error in buffer to errno */
 static int ccp_get_errno(struct ccp_device *ccp)
@@ -185,26 +188,38 @@ static int rmi_temperature(
     return temp;
 }
 
-int powe(int x, int exp)
+int pow2i(int exp)
 {
-    int i,bits=32;
-    int d=1;
-    for (i=0;i<bits;i++)
-    {
-        d*=d;
-        if (exp & 0x80000000)
-            d *= x;
-        exp<<=1;
-    }
-
-    return d;
+	return (1<<exp);
 }
 
-int powi(int x, int exp)
+int get_int_from_uint16_double(uint16_t data)
 {
+	uint32_t fraction = data & 2047;
+	int32_t exponent = data >> 11;
+	uint32_t result;
+	
+	if ( fraction > 1023 )
+		fraction = -( 2048 - fraction );
+	
+	if ( ( fraction & 1 ) == 1 )
+		fraction++;
+	
+	if ( exponent > 15 )
+		exponent = -( 32 - exponent );
+		
+	result = fraction * 1000;
+	if (exponent > 0)
+	{
+		result *= pow2i(exponent);
+	}
+	else
+	{
+		result /= pow2i(-exponent);
+	}
 
-    return (1000/powe(x, -exp));
-
+	return result;
+	
 }
 
 static int rmi_voltage(
@@ -240,26 +255,94 @@ static int rmi_voltage(
     if (ret < 0)
         return ret;
 
-    uint16_t temp;// = ( ccp->buffer[2] << 8 ) + ccp->buffer[3];
-    memcpy( &temp, ccp->buffer+ 2, 2 );
+	uint16_t temp = ( ccp->buffer[3] << 8 ) | ccp->buffer[2];
 
-    uint16_t fraction = temp & 2047;
-
-    if ( fraction > 1023 )
-        fraction = -( 2048 - fraction );
-
-    if ( ( fraction & 1 ) == 1 )
-        fraction++;
-
-    int exponent = temp >> 11;
-    if ( exponent > 15 )
-        exponent = -( 32 - exponent );
-
-    printk("%d Fraction: %d, Exponent: %d", probe, fraction, exponent);
-    printk("probe %d: b[2]: %d, b[3]: %d", probe, ccp->buffer[2], ccp->buffer[3]);
-
-    return fraction * powi(2, exponent);
+	return get_int_from_uint16_double(temp);
 }
+
+static int rmi_power(
+    struct ccp_device* ccp,
+    uint8_t probe)
+{
+    int ret;
+
+    if (probe == 0) //Power suuply
+    {
+        ccp->buffer[0] = 0x03;
+        ccp->buffer[1] = 0xEE;
+        ccp->buffer[2] = 0x00;
+        ccp->buffer[3] = 0x00;
+    }
+    else
+    {
+
+        ccp->buffer[0] = 0x02;
+        ccp->buffer[1] = 0x00;
+        ccp->buffer[2] = probe - 1;
+
+        rmi_send_cmd(ccp, true);
+
+        ccp->buffer[0] = 0x03;
+        ccp->buffer[1] = 0x96;
+        ccp->buffer[2] = 0x00;
+        ccp->buffer[3] = 0x00;
+    }
+
+
+    ret = rmi_send_cmd(ccp, true);
+    if (ret < 0)
+        return ret;
+
+    uint16_t temp = ( ccp->buffer[3] << 8 ) | ccp->buffer[2];
+
+	return get_int_from_uint16_double(temp) * 1000;
+}
+
+static int rmi_current(
+	struct ccp_device* ccp,
+	uint8_t probe)
+{
+	int ret;
+	
+	ccp->buffer[0] = 0x02;
+	ccp->buffer[1] = 0x00;
+	ccp->buffer[2] = probe;
+	
+	rmi_send_cmd(ccp, true);
+	
+	ccp->buffer[0] = 0x03;
+	ccp->buffer[1] = 0x8C;
+	ccp->buffer[2] = 0x00;
+	ccp->buffer[3] = 0x00;
+	
+	ret = rmi_send_cmd(ccp, true);
+	if (ret < 0)
+		return ret;
+	
+	uint16_t temp = ( ccp->buffer[3] << 8 ) | ccp->buffer[2];
+	
+	return get_int_from_uint16_double(temp);
+}
+
+static int rmi_fan(
+	struct ccp_device* ccp)
+{
+	int ret;
+	
+	ccp->buffer[0] = 0x03;
+	ccp->buffer[1] = 0x90;
+	ccp->buffer[2] = 0x00;
+	ccp->buffer[3] = 0x00;
+	
+	ret = rmi_send_cmd(ccp, true);
+	if (ret < 0)
+		return ret;
+	
+	uint16_t temp = ( ccp->buffer[3] << 8 ) | ccp->buffer[2];
+	
+	return temp;
+}
+
 
 /* requests and returns single data values depending on channel */
 static int get_data(struct ccp_device *ccp, int command, int channel, bool two_byte_data)
@@ -287,17 +370,39 @@ static int ccp_read_string(struct device *dev, enum hwmon_sensor_types type,
 	struct ccp_device *ccp = dev_get_drvdata(dev);
 
 	switch (type) {
-	case hwmon_fan:
-		switch (attr) {
-		case hwmon_fan_label:
-			*str = ccp->fan_label[channel];
-			return 0;
+		case hwmon_in:
+			switch (attr) {
+			case hwmon_in_label:
+				*str = channel_labels[channel];
+				return 0;
+			default:
+				break;
+			}
+			break;
+		
+		case hwmon_power:
+			switch (attr) {
+			case hwmon_power_label:
+				*str = channel_labels[channel];
+				return 0;
+			default:
+				break;
+			}
+			break;
+			
+		case hwmon_curr:
+			switch (attr) {
+				case hwmon_curr_label:
+					*str = channel_labels[channel];
+					return 0;
+				default:
+					break;
+			}
+			break;
+				
+
 		default:
 			break;
-		}
-		break;
-	default:
-		break;
 	}
 
 	return -EOPNOTSUPP;
@@ -325,7 +430,7 @@ static int ccp_read(struct device *dev, enum hwmon_sensor_types type,
 	case hwmon_fan:
 		switch (attr) {
 		case hwmon_fan_input:
-			ret = get_data(ccp, CTL_GET_FAN_RPM, channel, true);
+			ret = rmi_fan(ccp);
 			if (ret < 0)
 				return ret;
 			*val = ret;
@@ -341,13 +446,25 @@ static int ccp_read(struct device *dev, enum hwmon_sensor_types type,
 			break;
 		}
 		break;
-	case hwmon_pwm:
+	case hwmon_curr:
 		switch (attr) {
-		case hwmon_pwm_input:
-			ret = get_data(ccp, CTL_GET_FAN_PWM, channel, false);
+		case hwmon_curr_input:
+			ret = rmi_current(ccp, channel);
 			if (ret < 0)
 				return ret;
-			*val = DIV_ROUND_CLOSEST(ret * 255, 100);
+			*val = ret;
+			return 0;
+		default:
+			break;
+		}
+		break;
+	case hwmon_power:
+		switch (attr) {
+		case hwmon_power_input:
+			ret = rmi_power(ccp, channel);
+			if (ret < 0)
+				return ret;
+			*val = ret;
 			return 0;
 		default:
 			break;
