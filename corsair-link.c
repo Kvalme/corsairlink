@@ -18,6 +18,30 @@
 #include <linux/slab.h>
 #include <linux/types.h>
 
+
+// 0x1c09, /* RM550i */
+//
+// 0x1c0a, /* RM650i */
+//
+// 0x1c0b, /* RM750i */
+//
+// 0x1c0c, /* RM850i */
+//
+// 0x1c0d, /* RM1000i */
+//
+// 0x1c03, /* HX550i */
+//
+// 0x1c04, /* HX650i */
+//
+// 0x1c05, /* HX750i */
+//
+// 0x1c06, /* HX850i */
+//
+// 0x1c07, /* HX1000i */
+//
+// 0x1c08, /* HX1200i */
+
+
 #define USB_VENDOR_ID_CORSAIR			0x1b1c
 #define USB_PRODUCT_ID_CORSAIR_HX1000i		0x1c07
 
