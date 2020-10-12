@@ -25,7 +25,7 @@
 
 #define OUT_BUFFER_SIZE		64
 #define IN_BUFFER_SIZE		64
-#define LABEL_LENGTH		16
+#define LABEL_LENGTH		32
 #define REQ_TIMEOUT		300
 
 #define CMD_WRITE_REGISTER  0x02 //Writes register
@@ -60,7 +60,9 @@ struct clink_device {
     int command_index;
 };
 
-static const char channel_labels[4][LABEL_LENGTH] = { "Power supply", "+12V", "+5V", "+3.3V"};
+static const char power_labels[4][LABEL_LENGTH] = { "PSU input power", "+12V power", "+5V power", "+3.3V power"};
+static const char voltage_labels[4][LABEL_LENGTH] = { "PSU input voltage", "+12V voltage", "+5V voltage", "+3.3V voltage"};
+static const char current_labels[3][LABEL_LENGTH] = { "+12V current", "+5V current", "+3.3V current"};
 
 /* converts response error in buffer to errno */
 static int clink_get_errno(struct clink_device *clink)
@@ -282,7 +284,7 @@ static int clink_read_string(struct device *dev, enum hwmon_sensor_types type,
 		case hwmon_in:
 			switch (attr) {
 			case hwmon_in_label:
-				*str = channel_labels[channel];
+				*str = voltage_labels[channel];
 				return 0;
 			default:
 				break;
@@ -292,7 +294,7 @@ static int clink_read_string(struct device *dev, enum hwmon_sensor_types type,
 		case hwmon_power:
 			switch (attr) {
 			case hwmon_power_label:
-				*str = channel_labels[channel];
+				*str = power_labels[channel];
 				return 0;
 			default:
 				break;
@@ -302,7 +304,7 @@ static int clink_read_string(struct device *dev, enum hwmon_sensor_types type,
 		case hwmon_curr:
 			switch (attr) {
 				case hwmon_curr_label:
-					*str = channel_labels[channel + 1];
+					*str = current_labels[channel];
 					return 0;
 				default:
 					break;
