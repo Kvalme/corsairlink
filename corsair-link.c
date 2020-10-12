@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 /*
- * corsair-cpro.c - Linux driver for Corsair Commander Pro
- * Copyright (C) 2020 Marius Zachmann <mail@mariuszachmann.de>
+ * corsair-clink.c - Linux driver for Corsair Link based PSUs
+ * Copyright (C) 2020 Denis Biryukov  <denis.biruko@gmail.com>
+ *
+ * Based on corsair-cpro by 2020 Marius Zachmann
  *
  * This driver uses hid reports to communicate with the device to allow hidraw userspace drivers
  * still being used. The device does not use report ids. When using hidraw and this driver
@@ -19,31 +21,7 @@
 #include <linux/types.h>
 
 
-// 0x1c09, /* RM550i */
-//
-// 0x1c0a, /* RM650i */
-//
-// 0x1c0b, /* RM750i */
-//
-// 0x1c0c, /* RM850i */
-//
-// 0x1c0d, /* RM1000i */
-//
-// 0x1c03, /* HX550i */
-//
-// 0x1c04, /* HX650i */
-//
-// 0x1c05, /* HX750i */
-//
-// 0x1c06, /* HX850i */
-//
-// 0x1c07, /* HX1000i */
-//
-// 0x1c08, /* HX1200i */
-
-
-#define USB_VENDOR_ID_CORSAIR			0x1b1c
-#define USB_PRODUCT_ID_CORSAIR_HX1000i		0x1c07
+#define USB_VENDOR_ID_CORSAIR   0x1b1c
 
 #define OUT_BUFFER_SIZE		64
 #define IN_BUFFER_SIZE		64
@@ -52,71 +30,20 @@
 
 #define CMD_GET_ID  0x00
 
-#define CTL_GET_TMP_CNCT	0x10	/*
-					 * returns in bytes 1-4 for each temp sensor:
-					 * 0 not connected
-					 * 1 connected
-					 */
-#define CTL_GET_TMP		0x11	/*
-					 * send: byte 1 is channel, rest zero
-					 * rcv:  returns temp for channel in centi-degree celsius
-					 * in bytes 1 and 2
-					 * returns 0x11 in byte 0 if no sensor is connected
-					 */
-#define CTL_GET_VOLT		0x12	/*
-					 * send: byte 1 is rail number: 0 = 12v, 1 = 5v, 2 = 3.3v
-					 * rcv:  returns millivolt in bytes 1,2
-					 * returns error 0x10 if request is invalid
-					 */
-#define CTL_GET_FAN_CNCT	0x20	/*
-					 * returns in bytes 1-6 for each fan:
-					 * 0 not connected
-					 * 1 3pin
-					 * 2 4pin
-					 */
-#define CTL_GET_FAN_RPM		0x21	/*
-					 * send: byte 1 is channel, rest zero
-					 * rcv:  returns rpm in bytes 1,2
-					 */
-#define CTL_GET_FAN_PWM		0x22	/*
-					 * send: byte 1 is channel, rest zero
-					 * rcv:  returns pwm in byte 1 if it was set
-					 *	 returns error 0x12 if fan is controlled via
-					 *	 fan_target or fan curve
-					 */
-#define CTL_SET_FAN_FPWM	0x23	/*
-					 * set fixed pwm
-					 * send: byte 1 is fan number
-					 * send: byte 2 is percentage from 0 - 100
-					 */
-#define CTL_SET_FAN_TARGET	0x24	/*
-					 * set target rpm
-					 * send: byte 1 is fan number
-					 * send: byte 2-3 is target
-					 * device accepts all values from 0x00 - 0xFFFF
-					 */
-
-#define NUM_FANS            1
-#define NUM_TEMP_SENSORS    2
-#define NUM_POWER_SOURCES   4
-
-struct ccp_device {
+struct clink_device {
 	struct hid_device *hdev;
 	struct device *hwmon_dev;
 	struct completion wait_input_report;
 	struct mutex mutex; /* whenever buffer is used, lock before send_usb_cmd */
 	u8 *buffer;
-	int target[6];
-	char fan_label[6][LABEL_LENGTH];
-	
 };
 
 static const char channel_labels[4][LABEL_LENGTH] = { "Power supply", "+12V", "+5V", "+3.3V"};
 
 /* converts response error in buffer to errno */
-static int ccp_get_errno(struct ccp_device *ccp)
+static int clink_get_errno(struct clink_device *clink)
 {
-	switch (ccp->buffer[0]) {
+	switch (clink->buffer[0]) {
 	case 0x00: /* success */
 		return 0;
 	case 0x01: /* called invalid command */
@@ -127,63 +54,63 @@ static int ccp_get_errno(struct ccp_device *ccp)
 	case 0x12: /* requested pwm of not pwm controlled channels */
 		return -ENODATA;
 	default:
-		hid_dbg(ccp->hdev, "unknown device response error: %d", ccp->buffer[0]);
+		hid_dbg(clink->hdev, "unknown device response error: %d", clink->buffer[0]);
 		return -EIO;
 	}
 }
 
-/* send command, check for error in response, response in ccp->buffer */
-static int send_usb_cmd(struct ccp_device *ccp, u8 command, u8 byte1, u8 byte2, u8 byte3)
+/* send command, check for error in response, response in clink->buffer */
+static int send_usb_cmd(struct clink_device *clink, u8 command, u8 byte1, u8 byte2, u8 byte3)
 {
 	unsigned long t;
 	int ret;
 
-	memset(ccp->buffer, 0x00, OUT_BUFFER_SIZE);
-	ccp->buffer[0] = command;
-	ccp->buffer[1] = byte1;
-	ccp->buffer[2] = byte2;
-	ccp->buffer[3] = byte3;
+	memset(clink->buffer, 0x00, OUT_BUFFER_SIZE);
+	clink->buffer[0] = command;
+	clink->buffer[1] = byte1;
+	clink->buffer[2] = byte2;
+	clink->buffer[3] = byte3;
 
-	reinit_completion(&ccp->wait_input_report);
+	reinit_completion(&clink->wait_input_report);
 
-	ret = hid_hw_output_report(ccp->hdev, ccp->buffer, OUT_BUFFER_SIZE);
+	ret = hid_hw_output_report(clink->hdev, clink->buffer, OUT_BUFFER_SIZE);
 	if (ret < 0)
 		return ret;
 
-	t = wait_for_completion_timeout(&ccp->wait_input_report, msecs_to_jiffies(REQ_TIMEOUT));
+	t = wait_for_completion_timeout(&clink->wait_input_report, msecs_to_jiffies(REQ_TIMEOUT));
 	if (!t)
 		return -ETIMEDOUT;
 
-	return ccp_get_errno(ccp);
+	return clink_get_errno(clink);
 }
 
-static int ccp_raw_event(struct hid_device *hdev, struct hid_report *report, u8 *data, int size)
+static int clink_raw_event(struct hid_device *hdev, struct hid_report *report, u8 *data, int size)
 {
-	struct ccp_device *ccp = hid_get_drvdata(hdev);
+	struct clink_device *clink = hid_get_drvdata(hdev);
 
 	/* only copy buffer when requested */
-	if (completion_done(&ccp->wait_input_report))
+	if (completion_done(&clink->wait_input_report))
 		return 0;
 
-	memcpy(ccp->buffer, data, min(IN_BUFFER_SIZE, size));
-	complete(&ccp->wait_input_report);
+	memcpy(clink->buffer, data, min(IN_BUFFER_SIZE, size));
+	complete(&clink->wait_input_report);
 
 	return 0;
 }
 
-static int rmi_send_cmd(struct ccp_device* ccp, bool wait)
+static int rmi_send_cmd(struct clink_device* clink, bool wait)
 {
     int ret = 0;
 
-    reinit_completion(&ccp->wait_input_report);
+    reinit_completion(&clink->wait_input_report);
 
-    ret = hid_hw_output_report(ccp->hdev, ccp->buffer, OUT_BUFFER_SIZE);
+    ret = hid_hw_output_report(clink->hdev, clink->buffer, OUT_BUFFER_SIZE);
     if (ret < 0)
         return ret;
 
     if (wait)
     {
-        ret = wait_for_completion_timeout(&ccp->wait_input_report, msecs_to_jiffies(REQ_TIMEOUT));
+        ret = wait_for_completion_timeout(&clink->wait_input_report, msecs_to_jiffies(REQ_TIMEOUT));
         if (!ret)
             return -ETIMEDOUT;
     }
@@ -192,22 +119,22 @@ static int rmi_send_cmd(struct ccp_device* ccp, bool wait)
 }
 
 static int rmi_temperature(
-    struct ccp_device* ccp,
+    struct clink_device* clink,
     uint8_t probe)
 {
     int ret;
     uint16_t temp;
 
-    ccp->buffer[0] = 0x03;
-    ccp->buffer[1] = 0x8D + probe;
-    ccp->buffer[2] = 0x00;
-    ccp->buffer[3] = 0x00;
+    clink->buffer[0] = 0x03;
+    clink->buffer[1] = 0x8D + probe;
+    clink->buffer[2] = 0x00;
+    clink->buffer[3] = 0x00;
 
-    ret = rmi_send_cmd(ccp, true);
+    ret = rmi_send_cmd(clink, true);
     if (ret < 0)
         return ret;
 
-    temp = ( ccp->buffer[2] << 8 ) + ccp->buffer[3];
+    temp = ( clink->buffer[2] << 8 ) + clink->buffer[3];
 
     return temp;
 }
@@ -247,151 +174,151 @@ int get_int_from_uint16_double(uint16_t data)
 }
 
 static int rmi_voltage(
-    struct ccp_device* ccp,
+    struct clink_device* clink,
     uint8_t probe)
 {
     int ret;
 
     if (probe == 0) //Power suuply
     {
-        ccp->buffer[0] = 0x03;
-        ccp->buffer[1] = 0x88;
-        ccp->buffer[2] = 0x00;
-        ccp->buffer[3] = 0x00;
+        clink->buffer[0] = 0x03;
+        clink->buffer[1] = 0x88;
+        clink->buffer[2] = 0x00;
+        clink->buffer[3] = 0x00;
     }
     else
     {
 
-        ccp->buffer[0] = 0x02;
-        ccp->buffer[1] = 0x00;
-        ccp->buffer[2] = probe - 1;
+        clink->buffer[0] = 0x02;
+        clink->buffer[1] = 0x00;
+        clink->buffer[2] = probe - 1;
 
-        rmi_send_cmd(ccp, true);
+        rmi_send_cmd(clink, true);
 
-        ccp->buffer[0] = 0x03;
-        ccp->buffer[1] = 0x8B;
-        ccp->buffer[2] = 0x00;
-        ccp->buffer[3] = 0x00;
+        clink->buffer[0] = 0x03;
+        clink->buffer[1] = 0x8B;
+        clink->buffer[2] = 0x00;
+        clink->buffer[3] = 0x00;
     }
 
 
-    ret = rmi_send_cmd(ccp, true);
+    ret = rmi_send_cmd(clink, true);
     if (ret < 0)
         return ret;
 
-	uint16_t temp = ( ccp->buffer[3] << 8 ) | ccp->buffer[2];
+	uint16_t temp = ( clink->buffer[3] << 8 ) | clink->buffer[2];
 
 	return get_int_from_uint16_double(temp);
 }
 
 static int rmi_power(
-    struct ccp_device* ccp,
+    struct clink_device* clink,
     uint8_t probe)
 {
     int ret;
 
     if (probe == 0) //Power suuply
     {
-        ccp->buffer[0] = 0x03;
-        ccp->buffer[1] = 0xEE;
-        ccp->buffer[2] = 0x00;
-        ccp->buffer[3] = 0x00;
+        clink->buffer[0] = 0x03;
+        clink->buffer[1] = 0xEE;
+        clink->buffer[2] = 0x00;
+        clink->buffer[3] = 0x00;
     }
     else
     {
 
-        ccp->buffer[0] = 0x02;
-        ccp->buffer[1] = 0x00;
-        ccp->buffer[2] = probe - 1;
+        clink->buffer[0] = 0x02;
+        clink->buffer[1] = 0x00;
+        clink->buffer[2] = probe - 1;
 
-        rmi_send_cmd(ccp, true);
+        rmi_send_cmd(clink, true);
 
-        ccp->buffer[0] = 0x03;
-        ccp->buffer[1] = 0x96;
-        ccp->buffer[2] = 0x00;
-        ccp->buffer[3] = 0x00;
+        clink->buffer[0] = 0x03;
+        clink->buffer[1] = 0x96;
+        clink->buffer[2] = 0x00;
+        clink->buffer[3] = 0x00;
     }
 
 
-    ret = rmi_send_cmd(ccp, true);
+    ret = rmi_send_cmd(clink, true);
     if (ret < 0)
         return ret;
 
-    uint16_t temp = ( ccp->buffer[3] << 8 ) | ccp->buffer[2];
+    uint16_t temp = ( clink->buffer[3] << 8 ) | clink->buffer[2];
 
 	return get_int_from_uint16_double(temp) * 1000;
 }
 
 static int rmi_current(
-	struct ccp_device* ccp,
+	struct clink_device* clink,
 	uint8_t probe)
 {
 	int ret;
 	
-	ccp->buffer[0] = 0x02;
-	ccp->buffer[1] = 0x00;
-	ccp->buffer[2] = probe;
+	clink->buffer[0] = 0x02;
+	clink->buffer[1] = 0x00;
+	clink->buffer[2] = probe;
 	
-	rmi_send_cmd(ccp, true);
+	rmi_send_cmd(clink, true);
 	
-	ccp->buffer[0] = 0x03;
-	ccp->buffer[1] = 0x8C;
-	ccp->buffer[2] = 0x00;
-	ccp->buffer[3] = 0x00;
+	clink->buffer[0] = 0x03;
+	clink->buffer[1] = 0x8C;
+	clink->buffer[2] = 0x00;
+	clink->buffer[3] = 0x00;
 	
-	ret = rmi_send_cmd(ccp, true);
+	ret = rmi_send_cmd(clink, true);
 	if (ret < 0)
 		return ret;
 	
-	uint16_t temp = ( ccp->buffer[3] << 8 ) | ccp->buffer[2];
+	uint16_t temp = ( clink->buffer[3] << 8 ) | clink->buffer[2];
 	
 	return get_int_from_uint16_double(temp);
 }
 
 static int rmi_fan(
-	struct ccp_device* ccp)
+	struct clink_device* clink)
 {
 	int ret;
 	
-	ccp->buffer[0] = 0x03;
-	ccp->buffer[1] = 0x90;
-	ccp->buffer[2] = 0x00;
-	ccp->buffer[3] = 0x00;
+	clink->buffer[0] = 0x03;
+	clink->buffer[1] = 0x90;
+	clink->buffer[2] = 0x00;
+	clink->buffer[3] = 0x00;
 	
-	ret = rmi_send_cmd(ccp, true);
+	ret = rmi_send_cmd(clink, true);
 	if (ret < 0)
 		return ret;
 	
-	uint16_t temp = ( ccp->buffer[3] << 8 ) | ccp->buffer[2];
+	uint16_t temp = ( clink->buffer[3] << 8 ) | clink->buffer[2];
 	
 	return temp;
 }
 
 
 /* requests and returns single data values depending on channel */
-static int get_data(struct ccp_device *ccp, int command, int channel, bool two_byte_data)
+static int get_data(struct clink_device *clink, int command, int channel, bool two_byte_data)
 {
 	int ret;
 
-	mutex_lock(&ccp->mutex);
+	mutex_lock(&clink->mutex);
 
-	ret = send_usb_cmd(ccp, command, channel, 0, 0);
+	ret = send_usb_cmd(clink, command, channel, 0, 0);
 	if (ret)
 		goto out_unlock;
 
-	ret = ccp->buffer[1];
+	ret = clink->buffer[1];
 	if (two_byte_data)
-		ret = (ret << 8) + ccp->buffer[2];
+		ret = (ret << 8) + clink->buffer[2];
 
 out_unlock:
-	mutex_unlock(&ccp->mutex);
+	mutex_unlock(&clink->mutex);
 	return ret;
 }
 
-static int ccp_read_string(struct device *dev, enum hwmon_sensor_types type,
+static int clink_read_string(struct device *dev, enum hwmon_sensor_types type,
 			   u32 attr, int channel, const char **str)
 {
-	struct ccp_device *ccp = dev_get_drvdata(dev);
+	struct clink_device *clink = dev_get_drvdata(dev);
 
 	switch (type) {
 		case hwmon_in:
@@ -432,17 +359,17 @@ static int ccp_read_string(struct device *dev, enum hwmon_sensor_types type,
 	return -EOPNOTSUPP;
 }
 
-static int ccp_read(struct device *dev, enum hwmon_sensor_types type,
+static int clink_read(struct device *dev, enum hwmon_sensor_types type,
 		    u32 attr, int channel, long *val)
 {
-	struct ccp_device *ccp = dev_get_drvdata(dev);
+	struct clink_device *clink = dev_get_drvdata(dev);
 	int ret;
 
 	switch (type) {
 	case hwmon_temp:
 		switch (attr) {
 		case hwmon_temp_input:
-            ret = rmi_temperature(ccp, channel);
+            ret = rmi_temperature(clink, channel);
 			if (ret < 0)
 				return ret;
 			*val = ret;
@@ -454,17 +381,10 @@ static int ccp_read(struct device *dev, enum hwmon_sensor_types type,
 	case hwmon_fan:
 		switch (attr) {
 		case hwmon_fan_input:
-			ret = rmi_fan(ccp);
+			ret = rmi_fan(clink);
 			if (ret < 0)
 				return ret;
 			*val = ret;
-			return 0;
-		case hwmon_fan_target:
-			/* how to read target values from the device is unknown */
-			/* driver returns last set value or 0			*/
-			if (ccp->target[channel] < 0)
-				return -ENODATA;
-			*val = ccp->target[channel];
 			return 0;
 		default:
 			break;
@@ -473,7 +393,7 @@ static int ccp_read(struct device *dev, enum hwmon_sensor_types type,
 	case hwmon_curr:
 		switch (attr) {
 		case hwmon_curr_input:
-			ret = rmi_current(ccp, channel);
+			ret = rmi_current(clink, channel);
 			if (ret < 0)
 				return ret;
 			*val = ret;
@@ -485,7 +405,7 @@ static int ccp_read(struct device *dev, enum hwmon_sensor_types type,
 	case hwmon_power:
 		switch (attr) {
 		case hwmon_power_input:
-			ret = rmi_power(ccp, channel);
+			ret = rmi_power(clink, channel);
 			if (ret < 0)
 				return ret;
 			*val = ret;
@@ -497,7 +417,7 @@ static int ccp_read(struct device *dev, enum hwmon_sensor_types type,
 	case hwmon_in:
 		switch (attr) {
 		case hwmon_in_input:
-            ret = rmi_voltage(ccp, channel);
+            ret = rmi_voltage(clink, channel);
 			if (ret < 0)
 				return ret;
 			*val = ret;
@@ -513,43 +433,16 @@ static int ccp_read(struct device *dev, enum hwmon_sensor_types type,
 	return -EOPNOTSUPP;
 };
 
-static int ccp_write(struct device *dev, enum hwmon_sensor_types type,
-		     u32 attr, int channel, long val)
-{
-/*	struct ccp_device *ccp = dev_get_drvdata(dev);
-
-	switch (type) {
-	case hwmon_pwm:
-		switch (attr) {
-		case hwmon_pwm_input:
-		default:
-			break;
-		}
-		break;
-	case hwmon_fan:
-		switch (attr) {
-		case hwmon_fan_target:
-		default:
-			break;
-		}
-	default:
-		break;
-	}*/
-
-	return -EOPNOTSUPP;
-};
-
-static umode_t ccp_is_visible(const void *data, enum hwmon_sensor_types type,
+static umode_t clink_is_visible(const void *data, enum hwmon_sensor_types type,
 			      u32 attr, int channel)
 {
     return 0444;
 };
 
-static const struct hwmon_ops ccp_hwmon_ops = {
-	.is_visible = ccp_is_visible,
-	.read = ccp_read,
-	.read_string = ccp_read_string,
-	.write = ccp_write,
+static const struct hwmon_ops clink_hwmon_ops = {
+	.is_visible = clink_is_visible,
+	.read = clink_read,
+	.read_string = clink_read_string,
 };
 
 static const struct hwmon_channel_info *corsairlink_info[] = {
@@ -582,40 +475,40 @@ static const struct hwmon_channel_info *corsairlink_info[] = {
 	NULL
 };
 
-static const struct hwmon_chip_info ccp_chip_info = {
-	.ops = &ccp_hwmon_ops,
+static const struct hwmon_chip_info clink_chip_info = {
+	.ops = &clink_hwmon_ops,
 	.info = corsairlink_info,
 };
 
 static int corsairlink_rmi_name(
-    struct ccp_device* ccp,
+    struct clink_device* clink,
     char* name,
     uint8_t name_size )
 {
     int ret;
 
-    ccp->buffer[0] = 0xfe;
-    ccp->buffer[1] = 0x03;
+    clink->buffer[0] = 0xfe;
+    clink->buffer[1] = 0x03;
 
-    rmi_send_cmd(ccp, true);
+    rmi_send_cmd(clink, true);
 
-    memcpy(name, ccp->buffer + 2, 16);
+    memcpy(name, clink->buffer + 2, 16);
 
     return 0;
 }
 
-static int ccp_probe(struct hid_device *hdev, const struct hid_device_id *id)
+static int clink_probe(struct hid_device *hdev, const struct hid_device_id *id)
 {
-	struct ccp_device *ccp;
+	struct clink_device *clink;
 	int ret;
 
     printk("Start probing");
-	ccp = devm_kzalloc(&hdev->dev, sizeof(*ccp), GFP_KERNEL);
-	if (!ccp)
+	clink = devm_kzalloc(&hdev->dev, sizeof(*clink), GFP_KERNEL);
+	if (!clink)
 		return -ENOMEM;
 
-	ccp->buffer = devm_kmalloc(&hdev->dev, OUT_BUFFER_SIZE, GFP_KERNEL);
-	if (!ccp->buffer)
+	clink->buffer = devm_kmalloc(&hdev->dev, OUT_BUFFER_SIZE, GFP_KERNEL);
+	if (!clink->buffer)
 		return -ENOMEM;
 
 	ret = hid_parse(hdev);
@@ -630,28 +523,28 @@ static int ccp_probe(struct hid_device *hdev, const struct hid_device_id *id)
 	if (ret)
 		goto out_hw_stop;
 
-	ccp->hdev = hdev;
-	hid_set_drvdata(hdev, ccp);
-	mutex_init(&ccp->mutex);
-	init_completion(&ccp->wait_input_report);
+	clink->hdev = hdev;
+	hid_set_drvdata(hdev, clink);
+	mutex_init(&clink->mutex);
+	init_completion(&clink->wait_input_report);
 
 	hid_device_io_start(hdev);
 
     char name[64] = {0};
-    ret = corsairlink_rmi_name(ccp, name, 64);
+    ret = corsairlink_rmi_name(clink, name, 64);
     printk("Name:%s", name);
 	/* temp and fan connection status only updates when device is powered on */
-	//ret = get_temp_cnct(ccp);
+	//ret = get_temp_cnct(clink);
 	if (ret)
 		goto out_hw_close;
 
-/*	ret = get_fan_cnct(ccp);
+/*	ret = get_fan_cnct(clink);
 	if (ret)
 		goto out_hw_close;*/
-	ccp->hwmon_dev = hwmon_device_register_with_info(&hdev->dev, "corsairlink",
-							 ccp, &ccp_chip_info, 0);
-	if (IS_ERR(ccp->hwmon_dev)) {
-		ret = PTR_ERR(ccp->hwmon_dev);
+	clink->hwmon_dev = hwmon_device_register_with_info(&hdev->dev, "corsairlink",
+							 clink, &clink_chip_info, 0);
+	if (IS_ERR(clink->hwmon_dev)) {
+		ret = PTR_ERR(clink->hwmon_dev);
 		goto out_hw_close;
 	}
 
@@ -664,44 +557,54 @@ out_hw_stop:
 	return ret;
 }
 
-static void ccp_remove(struct hid_device *hdev)
+static void clink_remove(struct hid_device *hdev)
 {
-	struct ccp_device *ccp = hid_get_drvdata(hdev);
+	struct clink_device *clink = hid_get_drvdata(hdev);
 
-	hwmon_device_unregister(ccp->hwmon_dev);
+	hwmon_device_unregister(clink->hwmon_dev);
 	hid_hw_close(hdev);
 	hid_hw_stop(hdev);
 }
 
-static const struct hid_device_id ccp_devices[] = {
-	{ HID_USB_DEVICE(USB_VENDOR_ID_CORSAIR, USB_PRODUCT_ID_CORSAIR_HX1000i) },
+static const struct hid_device_id clink_devices[] = {
+	{ HID_USB_DEVICE(USB_VENDOR_ID_CORSAIR, 0x1c09) }, /* RM550i */
+    { HID_USB_DEVICE(USB_VENDOR_ID_CORSAIR, 0x1c0a) }, /* RM650i */
+    { HID_USB_DEVICE(USB_VENDOR_ID_CORSAIR, 0x1c0b) }, /* RM750i */
+    { HID_USB_DEVICE(USB_VENDOR_ID_CORSAIR, 0x1c0c) }, /* RM850i */
+    { HID_USB_DEVICE(USB_VENDOR_ID_CORSAIR, 0x1c0d) }, /* RM1000i */
+    { HID_USB_DEVICE(USB_VENDOR_ID_CORSAIR, 0x1c03) }, /* HX550i */
+    { HID_USB_DEVICE(USB_VENDOR_ID_CORSAIR, 0x1c04) }, /* HX650i */
+    { HID_USB_DEVICE(USB_VENDOR_ID_CORSAIR, 0x1c05) }, /* HX750i */
+    { HID_USB_DEVICE(USB_VENDOR_ID_CORSAIR, 0x1c06) }, /* HX850i */
+    { HID_USB_DEVICE(USB_VENDOR_ID_CORSAIR, 0x1c07) }, /* HX1000i */
+    { HID_USB_DEVICE(USB_VENDOR_ID_CORSAIR, 0x1c08) }, /* HX1200i */
 	{ }
 };
 
-static struct hid_driver ccp_driver = {
+static struct hid_driver clink_driver = {
 	.name = "corsair-link",
-	.id_table = ccp_devices,
-	.probe = ccp_probe,
-	.remove = ccp_remove,
-	.raw_event = ccp_raw_event,
+	.id_table = clink_devices,
+	.probe = clink_probe,
+	.remove = clink_remove,
+	.raw_event = clink_raw_event,
 };
 
-MODULE_DEVICE_TABLE(hid, ccp_devices);
+MODULE_DEVICE_TABLE(hid, clink_devices);
 MODULE_LICENSE("GPL");
 
-static int __init ccp_init(void)
+static int __init clink_init(void)
 {
-	return hid_register_driver(&ccp_driver);
+	return hid_register_driver(&clink_driver);
 }
 
-static void __exit ccp_exit(void)
+static void __exit clink_exit(void)
 {
-	hid_unregister_driver(&ccp_driver);
+	hid_unregister_driver(&clink_driver);
 }
 
 /*
  * When compiling this driver as built-in, hwmon initcalls will get called before the
  * hid driver and this driver would fail to register. late_initcall solves this.
  */
-late_initcall(ccp_init);
-module_exit(ccp_exit);
+late_initcall(clink_init);
+module_exit(clink_exit);
