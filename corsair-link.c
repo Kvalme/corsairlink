@@ -190,7 +190,7 @@ static int clink_voltage(
 
     if (probe != 0)
     {
-        clink_record_cmd2(clink, CMD_WRITE_REGISTER, REG_CHANNEL_SELECT, probe -1);
+        clink_record_cmd2(clink, CMD_WRITE_REGISTER, REG_CHANNEL_SELECT, probe - 1);
         ret = clink_send_cmd(clink);
         if (ret < 0)
             return ret;
@@ -218,13 +218,15 @@ static int clink_power(
 
     if (probe != 0)
     {
-        clink_record_cmd2(clink, CMD_WRITE_REGISTER, REG_CHANNEL_SELECT, probe -1);
+        clink_record_cmd2(clink, CMD_WRITE_REGISTER, REG_CHANNEL_SELECT, probe - 1);
         ret = clink_send_cmd(clink);
         if (ret < 0)
             return ret;
 
         reg = REG_POWER;
     }
+
+    clink_record_cmd(clink, CMD_READ_REGISTER, reg);
 
     ret = clink_send_cmd(clink);
     if (ret < 0)
@@ -300,7 +302,7 @@ static int clink_read_string(struct device *dev, enum hwmon_sensor_types type,
 		case hwmon_curr:
 			switch (attr) {
 				case hwmon_curr_label:
-					*str = channel_labels[channel];
+					*str = channel_labels[channel + 1];
 					return 0;
 				default:
 					break;
