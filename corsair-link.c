@@ -31,12 +31,11 @@
 #define CMD_WRITE_REGISTER  0x02 //Writes register
 #define CMD_READ_REGISTER   0x03 //Reads register
 
-#define REG_CHANNEL_SELECT 0x00 /* Selects channel for power/voltage.
-                                            * Argument - channel id
-                                            * 0 - +12V
-                                            * 1 - +5V
-                                            * 2 - +3.3V
-                                            */
+#define REG_CHANNEL_SELECT 0x00 /* Write to this register selects channel for power/voltage readings.
+                                 * 0 - +12V
+                                 * 1 - +5V
+                                 * 2 - +3.3V
+                                 */
 #define REG_TEMP_0      0x8D //Read-only T0
 #define REG_TEMP_1      0x8E //Read-only T1
 #define REG_VOLTAGE_PS  0x88 //Read-only power supply input voltage
@@ -47,8 +46,7 @@
 #define REG_POWER_PS    0xEE //Read-only power supply input power
 #define REG_DEVICE_NAME 0xFE //Read-only device name
 
-
-
+#define REG_RAIL        0xD8 //Read-write 1 - single-rail, 2 - multi-rail
 
 struct clink_device {
 	struct hid_device *hdev;
@@ -516,6 +514,20 @@ static void clink_remove(struct hid_device *hdev)
 	hid_hw_close(hdev);
 	hid_hw_stop(hdev);
 }
+/*
+static int clink_suspend(struct hid_device *hdev, pm_message_t message)
+{
+    struct clink_device *clink = hid_get_drvdata(hdev);
+
+    hwmon_device_unregister(clink->hwmon_dev);
+    hid_hw_close(hdev);
+    hid_hw_stop(hdev);
+}
+
+int (*resume)(struct hid_device *hdev);
+int (*reset_resume)(struct hid_device *hdev);
+*/
+
 
 static const struct hid_device_id clink_devices[] = {
 	{ HID_USB_DEVICE(USB_VENDOR_ID_CORSAIR, 0x1c09) }, /* RM550i */
